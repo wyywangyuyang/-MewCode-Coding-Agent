@@ -1050,6 +1050,76 @@ class MewCodeApp(App):
             ),
         )
 
+        # -----------------------------------------------------------------
+        # 自进化工具注册（受 allow_self_modification 元权限控制）
+        #
+        # 当 allow_self_modification: true 时，将 Harness 自进化工具
+        # 实例化并注册到 Agent 的 ToolRegistry，使 Agent 能在运行时：
+        #   - 增删生命周期 Hook（AddHook / RemoveHook / ListHooks）
+        #   - 热更新白名单内配置项（UpdateConfig）
+        #   - 管理本地权限规则（AddPermissionRule / RemovePermissionRule）
+        #   - 增删查长期记忆条目（ManageMemory）
+        #
+        # 所有自进化工具 category="harness"，权限检查器据此识别并
+        # 叠加 allow_self_modification 元权限校验。
+        # 单个工具注册失败不影响其余 — 异常被隔离并记录日志。
+        # -----------------------------------------------------------------
+        if allow_self:
+            import logging as _harness_log
+            _log = _harness_log.getLogger(__name__)
+
+            # 构建候选工具列表：(实例, 显示名称)
+            _tool_candidates: list[tuple[Any, str]] = []
+
+            # ---- Hook 管理 (依赖 self.hook_manager) ----
+            _tool_candidates.extend([
+                (AddHookTool(self.hook_manager),    "AddHook"),
+                (RemoveHookTool(self.hook_manager), "RemoveHook"),
+                (ListHooksTool(self.hook_manager),  "ListHooks"),
+            ])
+
+            # ---- 配置管理 (依赖 self.config_manager) ----
+            _tool_candidates.append(
+                (UpdateConfigTool(self.config_manager), "UpdateConfig")
+            )
+
+            # ---- 权限规则管理 (依赖 self.permission_manager_harness) ----
+            _tool_candidates.extend([
+                (AddPermissionRuleTool(self.permission_manager_harness),
+                 "AddPermissionRule"),
+                (RemovePermissionRuleTool(self.permission_manager_harness),
+                 "RemovePermissionRule"),
+            ])
+
+            # ---- Memory 管理 (依赖 self.memory_manager) ----
+            _tool_candidates.append(
+                (ManageMemoryTool(self.memory_manager), "ManageMemory")
+            )
+
+            # 逐个注册，异常隔离
+            _registered = 0
+            _failed = 0
+            for _tool_inst, _tool_name in _tool_candidates:
+                try:
+                    self.registry.register(_tool_inst)
+                    _registered += 1
+                    _log.info(
+                        "[harness] tool registered: %s (category=%s)",
+                        _tool_name,
+                        getattr(_tool_inst, 'category', 'unknown'),
+                    )
+                except Exception as _exc:
+                    _failed += 1
+                    _log.error(
+                        "[harness] tool registration failed: %s — %s",
+                        _tool_name, _exc,
+                    )
+
+            _log.info(
+                "[harness] self-evolution tools: %d registered, %d failed, %d total",
+                _registered, _failed, len(_tool_candidates),
+            )
+
         # 注入到 Agent
         if self.agent:
             self.agent.critic = self.critic
