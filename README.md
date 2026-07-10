@@ -527,14 +527,17 @@ MewCode Coding-Agent/
 │   │   ├── config_manager.py         # ConfigManager 动态配置管理
 │   │   ├── permission_manager.py     # PermissionManager 权限运行时管控
 │   │   ├── tools.py                  # Harness 内置自调控工具集（AddHook/RemoveHook/UpdateConfig 等）
-│   │   └── evolution/                # [新增] Agent 自进化子系统
+│   │   ├── backup/                   # [数据目录] 进化前 Skill 备份快照存放处（BackupManager 管理）
+│   │   ├── skills/                   # [数据目录] 自进化自动生成的 Skill 文件存放处（SkillGenerator 输出）
+│   │   ├── traces/                   # [数据目录] 执行轨迹 JSONL 按日分片存放处（ExecutionTraceStore 管理）
+│   │   └── evolution/                # Agent 自进化子系统
 │   │       ├── manager.py            # EvolutionManager 进化子系统门面
 │   │       ├── decision_loop.py      # EvolutionDecisionLoop 6 阶段进化决策主控
 │   │       ├── trace_store.py        # ExecutionTraceStore + TraceCollector 执行轨迹采集
 │   │       ├── problem_classifier.py # ProblemClassifier 失败模式 LLM 分类器
 │   │       ├── skill_generator.py    # SkillGenerator 基于证据的 Skill 自动生成
 │   │       ├── evaluator.py          # EvolutionEvaluator 历史用例重放评估
-│   │       ├── backup.py             # BackupManager 进化前自动备份
+│   │       ├── backup.py             # BackupManager 进化前自动备份与回滚
 │   │       ├── skill_meta.py         # SkillMetaManager 自动生成 Skill 元信息管理
 │   │       ├── models.py             # 进化系统数据模型（Trace/Pattern/Skill/Eval/Record）
 │   │       └── tools.py              # 进化工具集（TriggerEvolution/ListEvolutions 等 5 个工具）
