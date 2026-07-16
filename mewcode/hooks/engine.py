@@ -5,7 +5,9 @@ import logging
 from dataclasses import dataclass
 
 from mewcode.hooks.executors import execute_action
-from mewcode.hooks.models import ActionResult, Hook, HookContext, ToolRejectedError
+from mewcode.hooks.conditions import parse_condition
+from mewcode.hooks.models import Hook, HookContext, ToolRejectedError
+from mewcode.hooks.models import Action
 
 log = logging.getLogger(__name__)
 
@@ -113,3 +115,44 @@ class HookEngine:
         notifications = list(self._notifications)
         self._notifications.clear()
         return notifications
+
+    def register_runtime_hook(
+        self,
+        *,
+        hook_id: str,
+        event: str,
+        action_type: str,
+        action_config: dict,
+        condition: str = "",
+        once: bool = False,
+    ) -> None:
+        action = Action(type=action_type, **action_config)
+        parsed_condition = parse_condition(condition) if condition else None
+        self.hooks.append(
+            Hook(
+                id=hook_id,
+                event=event,
+                action=action,
+                condition=parsed_condition,
+                once=once,
+            )
+        )
+
+    def unregister_runtime_hook(self, hook_id: str) -> bool:
+        for index, hook in enumerate(self.hooks):
+            if hook.id == hook_id:
+                del self.hooks[index]
+                return True
+        return False
+
+    def list_runtime_hooks(self) -> list[dict]:
+        return [
+            {
+                "id": hook.id,
+                "event": hook.event,
+                "action_type": hook.action.type,
+                "once": hook.once,
+                "executed": hook.executed,
+            }
+            for hook in self.hooks
+        ]

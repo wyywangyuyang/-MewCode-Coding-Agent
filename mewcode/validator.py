@@ -213,6 +213,62 @@ def validate_teammate_mode(mode: object) -> str:
     return mode
 
 
+def validate_compact(raw_compact: dict | None) -> dict:
+    defaults = {"utilization_threshold": 0.85, "min_keep_messages": 3}
+    if raw_compact is None:
+        return defaults
+    if not isinstance(raw_compact, dict):
+        raise ConfigError("'compact' must be a mapping")
+    threshold = raw_compact.get("utilization_threshold", defaults["utilization_threshold"])
+    min_keep = raw_compact.get("min_keep_messages", defaults["min_keep_messages"])
+    if not isinstance(threshold, (int, float)) or not 0 < threshold < 1:
+        raise ConfigError("'compact.utilization_threshold' must be between 0 and 1")
+    if not isinstance(min_keep, int) or min_keep <= 0:
+        raise ConfigError("'compact.min_keep_messages' must be a positive integer")
+    return {"utilization_threshold": float(threshold), "min_keep_messages": min_keep}
+
+
+def validate_critic(raw_critic: dict | None) -> dict:
+    if raw_critic is None:
+        return {"enabled": False}
+    if not isinstance(raw_critic, dict):
+        raise ConfigError("'critic' must be a mapping")
+    return {
+        "enabled": validate_bool_field(raw_critic.get("enabled", False), "critic.enabled")
+    }
+
+
+def validate_rate_limit(raw_rate_limit: dict | None) -> dict:
+    defaults = {
+        "enabled": True,
+        "default_max_per_minute": 30,
+        "per_tool": {"Bash": 10, "WriteFile": 20},
+    }
+    if raw_rate_limit is None:
+        return defaults
+    if not isinstance(raw_rate_limit, dict):
+        raise ConfigError("'rate_limit' must be a mapping")
+    enabled = validate_bool_field(
+        raw_rate_limit.get("enabled", defaults["enabled"]), "rate_limit.enabled"
+    )
+    default_max = raw_rate_limit.get(
+        "default_max_per_minute", defaults["default_max_per_minute"]
+    )
+    if not isinstance(default_max, int) or default_max <= 0:
+        raise ConfigError("'rate_limit.default_max_per_minute' must be a positive integer")
+    per_tool = raw_rate_limit.get("per_tool", defaults["per_tool"])
+    if not isinstance(per_tool, dict) or not all(
+        isinstance(name, str) and isinstance(limit, int) and limit > 0
+        for name, limit in per_tool.items()
+    ):
+        raise ConfigError("'rate_limit.per_tool' must map tool names to positive integers")
+    return {
+        "enabled": enabled,
+        "default_max_per_minute": default_max,
+        "per_tool": dict(per_tool),
+    }
+
+
 def validate_evolution(raw_evo: dict | None) -> dict:
     """校验 evolution 配置段，返回清洗后的配置字典。"""
     defaults: dict = {
@@ -277,6 +333,9 @@ def validate_config_structure(raw: object) -> dict:
         "enable_coordinator_mode": validate_bool_field(
             raw.get("enable_coordinator_mode", False), "enable_coordinator_mode"
         ),
+        "compact": validate_compact(raw.get("compact")),
+        "critic": validate_critic(raw.get("critic")),
+        "rate_limit": validate_rate_limit(raw.get("rate_limit")),
         "allow_self_modification": validate_bool_field(
             raw.get("allow_self_modification", False), "allow_self_modification"
         ),

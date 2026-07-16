@@ -113,18 +113,19 @@ class WorkflowEngine:
                         if isinstance(target, ast.Name) and target.id == "META":
                             if isinstance(node.value, ast.Dict):
                                 for key, val in zip(node.value.keys, node.value.values):
-                                    if isinstance(key, ast.Constant) and isinstance(val, ast.Constant):
+                                    if not isinstance(key, ast.Constant):
+                                        continue
+                                    if key.value == "phases" and isinstance(val, ast.List):
+                                        phases = [
+                                            str(element.value)
+                                            for element in val.elts
+                                            if isinstance(element, ast.Constant)
+                                        ]
+                                    elif isinstance(val, ast.Constant):
                                         if key.value == "name":
                                             name = str(val.value)
                                         elif key.value == "description":
                                             description = str(val.value)
-                                        elif key.value == "phases":
-                                            if isinstance(val, ast.List):
-                                                phases = [
-                                                    str(e.value)
-                                                    for e in val.elts
-                                                    if isinstance(e, ast.Constant)
-                                                ]
         except SyntaxError:
             pass
 

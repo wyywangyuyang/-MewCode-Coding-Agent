@@ -19,6 +19,15 @@ from mewcode.worktree.models import WorktreeSession
 from mewcode.worktree.session import load_worktree_session, save_worktree_session
 from mewcode.worktree.slug import flatten_slug, validate_slug
 
+
+@pytest.fixture(autouse=True)
+def current_event_loop():
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    yield
+    loop.close()
+    asyncio.set_event_loop(None)
+
 # =========================================================================
 # A. Slug 校验
 # =========================================================================

@@ -34,7 +34,13 @@ class PathSandbox:
             real_path = abs_path.resolve(strict=True)
         except OSError:
             ancestor = abs_path
-            while not ancestor.exists():
+            while True:
+                try:
+                    exists = ancestor.exists()
+                except OSError:
+                    exists = False
+                if exists:
+                    break
                 parent = ancestor.parent
                 if parent == ancestor:
                     return False, f"无法解析路径: {path}"

@@ -27,4 +27,24 @@ build-backend = "hatchling.build"
 dev = [
     "pytest>=9.0.3",
     "pytest-asyncio>=1.3.0",
+    "pytest-timeout>=2.4.0",
+    "ruff>=0.14.0",
 ]
+
+[tool.pytest.ini_options]
+asyncio_mode = "strict"
+timeout = 60
+markers = [
+    "integration: requires external processes or platform integration",
+    "slow: takes materially longer than the unit-test suite",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+# Phase 0 keeps the lint gate intentionally low-noise: syntax errors,
+# invalid constructs, and undefined names only. Broader style cleanup is
+# deferred so the baseline does not require unrelated repository-wide churn.
+select = ["E9", "F63", "F7", "F82"]

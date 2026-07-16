@@ -153,8 +153,9 @@ class CronStore:
 
         due: list[CronJob] = []
         for job in self.list():
+            reference = job.last_fired_at or job.created_at
             next_fire = job.get_next_fire(
-                after=_parse_iso(job.last_fired_at) if job.last_fired_at else now
+                after=_parse_iso(reference) if reference else now
             )
             if next_fire is not None and next_fire <= now:
                 due.append(job)

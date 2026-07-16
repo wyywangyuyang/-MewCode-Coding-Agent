@@ -566,8 +566,7 @@ async def test_e2e_default_mode_write_triggers_ask():
 async def test_e2e_bypass_mode_allows_all():
     """Bypass 模式无需询问，放行一切操作。"""
     tmpdir = Path(tempfile.mkdtemp())
-    test_file = tmpdir / "existing.txt"
-    test_file.write_text("original")
+    test_file = tmpdir / "new.txt"
 
     client = MockLLMClient([
         [

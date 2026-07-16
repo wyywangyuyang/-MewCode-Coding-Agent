@@ -41,7 +41,7 @@ class ConfigManager:
         self._config = app_config
         self._changes: list[ConfigChange] = []
 
-    def set_config(self, app_config: Any) -> None:
+    def bind_config(self, app_config: Any) -> None:
         """注入配置引用。"""
         self._config = app_config
 

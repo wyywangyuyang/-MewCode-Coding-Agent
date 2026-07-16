@@ -10,7 +10,7 @@ SKIP_DIRS = {".git", ".venv", "node_modules", "__pycache__", ".tox", ".mypy_cach
 
 MAX_OUTPUT_CHARS = 10000
 
-ToolCategory = Literal["read", "write", "command"]
+ToolCategory = Literal["read", "write", "command", "harness"]
 
 
 @dataclass

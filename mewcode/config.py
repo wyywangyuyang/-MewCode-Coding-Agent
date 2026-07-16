@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -180,11 +181,17 @@ class AppConfig:
     evolution: EvolutionConfig = field(default_factory=EvolutionConfig)
 
 
-def _load_single_file(path: Path) -> AppConfig:
+def _read_config_file(path: Path) -> dict:
     try:
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))
     except yaml.YAMLError as e:
         raise ConfigError(f"Failed to parse config {path}: {e}") from e
+    if not isinstance(raw, dict):
+        raise ConfigError(f"Config {path} must be a mapping")
+    return raw
+
+
+def _build_config(raw: dict) -> AppConfig:
 
     validated = validate_config_structure(raw)
 
@@ -233,16 +240,16 @@ def _load_single_file(path: Path) -> AppConfig:
         enable_coordinator_mode=validated["enable_coordinator_mode"],
         # Harness Engineering 新增
         compact=CompactConfig(
-            utilization_threshold=validated.get("compact", {}).get("utilization_threshold", 0.85),
-            min_keep_messages=validated.get("compact", {}).get("min_keep_messages", 3),
+            utilization_threshold=validated["compact"]["utilization_threshold"],
+            min_keep_messages=validated["compact"]["min_keep_messages"],
         ),
         critic=CriticConfig(
-            enabled=validated.get("critic", {}).get("enabled", False),
+            enabled=validated["critic"]["enabled"],
         ),
         rate_limit=RateLimitConfig(
-            enabled=validated.get("rate_limit", {}).get("enabled", True),
-            default_max_per_minute=validated.get("rate_limit", {}).get("default_max_per_minute", 30),
-            per_tool=validated.get("rate_limit", {}).get("per_tool", {"Bash": 10, "WriteFile": 20}),
+            enabled=validated["rate_limit"]["enabled"],
+            default_max_per_minute=validated["rate_limit"]["default_max_per_minute"],
+            per_tool=validated["rate_limit"]["per_tool"],
         ),
         allow_self_modification=validated.get("allow_self_modification", False),
         allow_self_evolution=validated.get("allow_self_evolution", False),
@@ -258,31 +265,45 @@ def _load_single_file(path: Path) -> AppConfig:
     )
 
 
-def _merge_config(base: AppConfig, override: AppConfig) -> AppConfig:
-    if override.providers:
-        base.providers = override.providers
-    if override.permission_mode != "default":
-        base.permission_mode = override.permission_mode
+def _load_single_file(path: Path) -> AppConfig:
+    return _build_config(_read_config_file(path))
 
-    if override.mcp_servers:
-        by_name = {s.name: i for i, s in enumerate(base.mcp_servers)}
-        for s in override.mcp_servers:
-            if s.name in by_name:
-                base.mcp_servers[by_name[s.name]] = s
-            else:
-                base.mcp_servers.append(s)
-                by_name[s.name] = len(base.mcp_servers) - 1
 
-    base.raw_hooks.extend(override.raw_hooks)
-    if override.enable_fork:
-        base.enable_fork = True
-    if override.enable_verification_agent:
-        base.enable_verification_agent = True
-    if override.teammate_mode:
-        base.teammate_mode = override.teammate_mode
-    if override.enable_coordinator_mode:
-        base.enable_coordinator_mode = True
-    return base
+def _merge_named_list(base: list, override: list, field_name: str) -> list:
+    merged = deepcopy(base)
+    positions = {
+        item["name"]: index
+        for index, item in enumerate(merged)
+        if isinstance(item, dict) and isinstance(item.get("name"), str)
+    }
+    for item in override:
+        if not isinstance(item, dict) or not isinstance(item.get("name"), str):
+            raise ConfigError(f"'{field_name}' entries must contain a string 'name'")
+        name = item["name"]
+        if name in positions:
+            merged[positions[name]] = deepcopy(item)
+        else:
+            positions[name] = len(merged)
+            merged.append(deepcopy(item))
+    return merged
+
+
+def _merge_raw_config(base: dict, override: dict) -> dict:
+    merged = deepcopy(base)
+    for key, value in override.items():
+        if key == "hooks":
+            if not isinstance(value, list) or not isinstance(merged.get(key, []), list):
+                raise ConfigError("'hooks' must be a list of hook definitions")
+            merged[key] = deepcopy(merged.get(key, [])) + deepcopy(value)
+        elif key == "mcp_servers":
+            if not isinstance(value, list) or not isinstance(merged.get(key, []), list):
+                raise ConfigError("'mcp_servers' must be a list of server configs")
+            merged[key] = _merge_named_list(merged.get(key, []), value, key)
+        elif isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _merge_raw_config(merged[key], value)
+        else:
+            merged[key] = deepcopy(value)
+    return merged
 
 
 def load_config(path: Path | None = None) -> AppConfig:
@@ -299,19 +320,19 @@ def load_config(path: Path | None = None) -> AppConfig:
         cwd / ".mewcode" / "config.local.yaml",
     ]
 
-    merged: AppConfig | None = None
+    merged_raw: dict | None = None
     for p in candidates:
         if not p.exists():
             continue
-        layer = _load_single_file(p)
-        if merged is None:
-            merged = layer
+        layer = _read_config_file(p)
+        if merged_raw is None:
+            merged_raw = layer
         else:
-            merged = _merge_config(merged, layer)
+            merged_raw = _merge_raw_config(merged_raw, layer)
 
-    if merged is None:
+    if merged_raw is None:
         raise ConfigError(
             "No config file found. Expected .mewcode/config.yaml "
             "in project or ~/.mewcode/config.yaml"
         )
-    return merged
+    return _build_config(merged_raw)

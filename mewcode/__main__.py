@@ -71,6 +71,7 @@ def main() -> None:
         worktree_config=config.worktree,
         teammate_mode=config.teammate_mode,
         enable_coordinator_mode=config.enable_coordinator_mode,
+        app_config=config,
         driver_class=NoAltScreenDriver,
     )
     # 注入 Harness 配置到 app 实例（app 在 _init_harness 中读取）

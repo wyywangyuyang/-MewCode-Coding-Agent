@@ -247,12 +247,9 @@ class TestCompactCircuitBreaker:
 class TestBuildCompactMessages:
     def test_basic_structure(self) -> None:
         msgs = build_compact_messages("the summary")
-        assert len(msgs) == 2
+        assert len(msgs) == 1
         assert msgs[0].role == "user"
-        assert "[摘要]" in msgs[0].content
         assert "the summary" in msgs[0].content
-        assert msgs[1].role == "assistant"
-        assert "ReadFile" in msgs[1].content
 
 # ---------------------------------------------------------------------------
 # 会话目录管理

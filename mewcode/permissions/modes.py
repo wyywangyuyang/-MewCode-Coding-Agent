@@ -19,12 +19,12 @@ class PermissionMode(str, Enum):
 
 
 _MODE_MATRIX: dict[PermissionMode, dict[ToolCategory, DecisionEffect]] = {
-    PermissionMode.DEFAULT: {"read": "allow", "write": "ask", "command": "ask"},
-    PermissionMode.ACCEPT_EDITS: {"read": "allow", "write": "allow", "command": "ask"},
-    PermissionMode.PLAN: {"read": "allow", "write": "ask", "command": "ask"},
-    PermissionMode.BYPASS: {"read": "allow", "write": "allow", "command": "allow"},
-    PermissionMode.CUSTOM: {"read": "ask", "write": "ask", "command": "ask"},
-    PermissionMode.DONT_ASK: {"read": "allow", "write": "allow", "command": "allow"},
+    PermissionMode.DEFAULT: {"read": "allow", "write": "ask", "command": "ask", "harness": "ask"},
+    PermissionMode.ACCEPT_EDITS: {"read": "allow", "write": "allow", "command": "ask", "harness": "ask"},
+    PermissionMode.PLAN: {"read": "allow", "write": "deny", "command": "deny", "harness": "deny"},
+    PermissionMode.BYPASS: {"read": "allow", "write": "allow", "command": "allow", "harness": "allow"},
+    PermissionMode.CUSTOM: {"read": "ask", "write": "ask", "command": "ask", "harness": "ask"},
+    PermissionMode.DONT_ASK: {"read": "allow", "write": "allow", "command": "allow", "harness": "allow"},
 }
 
 

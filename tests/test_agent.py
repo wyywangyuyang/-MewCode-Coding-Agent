@@ -118,19 +118,19 @@ async def test_single_step_tool_call():
     assert c["loop"][0].total_turns == 2
 
 @pytest.mark.asyncio
-async def test_multi_step_autonomous():
+async def test_multi_step_autonomous(tmp_path):
     """Agent 先 WriteFile 再 ReadFile 然后停止 —— 端到端的多步流程。"""
     client = MockLLMClient([
         # 第 1 轮：WriteFile
         [
             TextDelta("Creating file."),
-            ToolCallComplete("t1", "WriteFile", {"file_path": "/tmp/mewcode_test_hello.txt", "content": "Hello World"}),
+            ToolCallComplete("t1", "WriteFile", {"file_path": str(tmp_path / "mewcode_test_hello.txt"), "content": "Hello World"}),
             StreamEnd("end_turn", input_tokens=10, output_tokens=20),
         ],
         # 第 2 轮：ReadFile 进行验证
         [
             TextDelta("Verifying content."),
-            ToolCallComplete("t2", "ReadFile", {"file_path": "/tmp/mewcode_test_hello.txt"}),
+            ToolCallComplete("t2", "ReadFile", {"file_path": str(tmp_path / "mewcode_test_hello.txt")}),
             StreamEnd("end_turn", input_tokens=40, output_tokens=25),
         ],
         # 第 3 轮：最终答案
@@ -140,7 +140,7 @@ async def test_multi_step_autonomous():
         ],
     ])
     registry = create_default_registry()
-    agent = Agent(client, registry, "anthropic", work_dir="/tmp")
+    agent = Agent(client, registry, "anthropic", work_dir=str(tmp_path))
     conv = ConversationManager()
     conv.add_user_message("Create hello.txt with Hello World, then verify")
 
@@ -310,12 +310,12 @@ async def test_message_splicing():
 
     # 检查对话历史
     msgs = build_anthropic_messages(conv.get_messages())
-    # env_context(user) + user_message + assistant(text+2 个 tool_use) + user(2 个 tool_result) + assistant(最终响应)
-    assert len(msgs) == 5
-    assistant_msg = msgs[2]
+    # 环境上下文会与首条用户消息合并，避免连续 user role。
+    assert len(msgs) == 4
+    assistant_msg = msgs[1]
     assert assistant_msg["role"] == "assistant"
     assert len(assistant_msg["content"]) == 3  # text + 2 个 tool_use
-    tool_results_msg = msgs[3]
+    tool_results_msg = msgs[2]
     assert tool_results_msg["role"] == "user"
     assert len(tool_results_msg["content"]) == 2  # 2 个 tool_result
     assert tool_results_msg["content"][0]["tool_use_id"] == "t1"

@@ -6,7 +6,12 @@ import os
 import random
 import time as _time
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from mewcode.askuser_dialog import InlineAskUserWidget
+    from mewcode.permission_dialog import InlinePermissionWidget
+    from mewcode.plan_dialog import InlinePlanWidget
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -46,7 +51,7 @@ from mewcode.commands import (
 )
 from mewcode.commands.completion import CompletionPopup
 from mewcode.commands.handlers import register_all_commands
-from mewcode.config import MCPServerConfig, ProviderConfig
+from mewcode.config import AppConfig, MCPServerConfig, ProviderConfig
 from mewcode.hooks import HookContext, HookEngine, load_hooks
 from mewcode.conversation import ConversationManager, Message
 from mewcode.mcp import MCPManager
@@ -576,6 +581,7 @@ class MewCodeApp(App):
         worktree_config: Any = None,
         teammate_mode: str = "",
         enable_coordinator_mode: bool = False,
+        app_config: AppConfig | None = None,
         driver_class: type | None = None,
     ) -> None:
         super().__init__(driver_class=driver_class)
@@ -588,6 +594,7 @@ class MewCodeApp(App):
         self._worktree_config = worktree_config
         self._teammate_mode = teammate_mode
         self._enable_coordinator_mode = enable_coordinator_mode
+        self._app_config = app_config
         self.file_cache = FileCache()
         self.client: LLMClient | None = None
         self.conversation = ConversationManager()
@@ -785,6 +792,7 @@ class MewCodeApp(App):
         wt_cfg = self._worktree_config or WorktreeConfig()
         self.worktree_manager = WorktreeManager(
             repo_root=work_dir,
+            file_cache=self.file_cache,
             symlink_directories=wt_cfg.symlink_directories,
         )
         restored = self.worktree_manager.restore_session()
@@ -1044,7 +1052,7 @@ class MewCodeApp(App):
 
         # Harness Managers
         self.hook_manager = HookManager(hook_engine=self.hook_engine)
-        self.config_manager = ConfigManager()
+        self.config_manager = ConfigManager(self._app_config)
         self.permission_manager_harness = PermissionManager(
             work_dir=work_dir,
             rule_engine=(

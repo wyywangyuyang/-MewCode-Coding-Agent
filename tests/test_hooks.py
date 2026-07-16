@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from typing import Any, AsyncIterator
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -248,11 +248,15 @@ class TestCommandExecutor:
     async def test_timeout(self):
         from mewcode.hooks.executors import execute_command
 
-        action = Action(type="command", command="sleep 10", timeout=1)
-        ctx = HookContext()
-        result = await execute_command(action, ctx)
+        proc = MagicMock()
+        proc.communicate = AsyncMock(side_effect=asyncio.TimeoutError)
+        proc.wait = AsyncMock(return_value=0)
+        action = Action(type="command", command="slow-command", timeout=1)
+        with patch("mewcode.hooks.executors.asyncio.create_subprocess_shell", return_value=proc):
+            result = await execute_command(action, HookContext())
         assert result.success is False
         assert "timed out" in result.output
+        proc.kill.assert_called_once()
 
 class TestPromptExecutor:
     @pytest.mark.asyncio
@@ -488,12 +492,24 @@ class TestHookEngine:
         h = self._make_hook(
             id="slow",
             event="post_tool_use",
-            action=Action(type="command", command="sleep 5"),
+            action=Action(type="command", command="slow-command"),
             async_exec=True,
         )
         engine = HookEngine([h])
         ctx = HookContext(event_name="post_tool_use")
-        await engine.run_hooks("post_tool_use", ctx)
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def slow_action(action, context):
+            started.set()
+            await release.wait()
+            return ActionResult(output="done", success=True)
+
+        with patch("mewcode.hooks.engine.execute_action", side_effect=slow_action):
+            await engine.run_hooks("post_tool_use", ctx)
+            await asyncio.wait_for(started.wait(), timeout=1)
+            release.set()
+            await asyncio.sleep(0)
 
 # ---------------------------------------------------------------------------
 # Agent 循环集成
