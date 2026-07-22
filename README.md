@@ -1,6 +1,6 @@
 # MewCode Coding-Agent
 
-轻量级终端 Coding Agent，基于 **ReAct** 与 **Plan Mode** 双模式驱动 LLM 自主完成编程任务。采用交互、引擎、工具、记忆、安全五层分层架构，引入 **Loop Engineering + Harness Engineering** 双工程体系；兼容 **Anthropic**、**OpenAI** 双协议，支持 MCP 工具扩展、Skill 技能包、跨会话记忆、多 Agent 并行协作，具备 **🧬 Agent 自进化** 能力——从执行轨迹中识别失败模式，自动生成 Skill 并评估保留。
+轻量级终端 Coding Agent，基于 **ReAct** 与 **Plan Mode** 双模式驱动 LLM 自主完成编程任务。采用交互、引擎、工具、记忆、安全五层分层架构，引入 **Loop Engineering + Harness Engineering** 双工程体系；兼容 **Anthropic**、**OpenAI** 双协议，支持 MCP 工具扩展、Skill 技能包、跨会话记忆、多 Agent 并行协作，具备 **🧬 Agent 自进化** 能力——**失败驱动 + 成功经验** 双路闭环，从执行轨迹中识别失败模式与成功经验，自动生成 Skill、评估晋升并注入复用。
 
 ## 核心特性
 
@@ -8,7 +8,7 @@
 - **🏗️ 五层分层架构** — 交互层（TUI）、引擎层（Agent 主循环）、工具层（Tool Registry）、记忆层（Memory）、安全层（Permissions），职责清晰、可扩展
 - **🔁 Loop Engineering** — Workflow Engine 工作流编排引擎，支持 phase-based 分阶段执行、Journal 断点恢复、预算控制循环（loop_until_budget）和 Cron 定时调度系统
 - **⚙️ Harness Engineering** — 标准化运行基座，提供完整性校验（CompletenessCritic）、审计日志（AuditLogger）、速率限制（RateLimiter）、指标收集（MetricsCollector）四大增强组件，支持 Agent 运行时自调控（Hook/Config/Permission/Memory 动态管理）
-- **🧬 Agent 自进化** — 6 阶段自主进化闭环：执行轨迹采集 → 失败模式分类 → 自动生成 Skill → 重放历史用例评估 → Keep/Rollback 决策 → 归档至 Memory。Agent 能从错误中学习，自动补全缺失能力
+- **🧬 Agent 自进化（双路闭环）** — **失败补救路径**：6 阶段闭环（采集→分类→生成→评估→决策→归档），从错误中学习并自动补全能力短板。**成功经验路径**：识别复杂成功任务→生成指南型 Skill→候选晋升正式→语义匹配注入→命中后降本评估，让 Agent 复用历史成功经验而非从零摸索
 - **🤖 Multi-Agent 协作** — 内置子 Agent 分发（Fork / SubAgent）、Team 团队协作（Coordinator 模式），支持多 Agent 并行执行
 - ** MCP 协议扩展** — 兼容 Model Context Protocol，可对接外部 MCP Server 动态扩展工具能力
 - **📦 Skill 技能包** — 内置 commit、review、test 等技能，支持自定义 Skill 扩展，一键激活
@@ -92,15 +92,28 @@ Agent 采用标准 ReAct（Reasoning + Acting）循环：
 - **Skill 元信息管理（SkillMetaManager）**：追踪自动生成 Skill 的状态（active/deprecated/superseded）、来源 trace、使用统计
 - **进化决策循环（EvolutionDecisionLoop）**：串联 6 阶段的主控逻辑，防重入保护，支持手动触发（TriggerEvolution 工具）和自动触发（任务完成后检查）
 
-进化工具集（Harness 工具，需 `allow_self_modification=true`）：
+进化工具集（Harness 工具，需 `allow_self_evolution=true`）：
 
 | 工具 | 功能 |
 |------|------|
-| `TriggerEvolution` | 手动触发一轮进化检查 |
-| `ListEvolutions` | 列出进化历史记录 |
+| `TriggerEvolution` | 手动触发一轮进化检查（双路） |
+| `ListEvolutions` | 列出进化历史记录（含 path 字段区分 success/failure） |
 | `GetEvolutionDetail` | 查看某次进化的详细信息 |
-| `ListAutoSkills` | 列出自动生成的 Skill 及状态 |
+| `ListAutoSkills` | 列出自动生成的 Skill 及状态（candidate/active/deprecated） |
 | `DeprecateSkill` | 手动废弃某个自动生成的 Skill |
+
+### 成功经验驱动的自进化（Success-Driven Path）
+
+在失败驱动的基础上，新增**成功经验路径**——让 Agent 从复杂成功任务中沉淀可复用经验，而非仅从失败中补救：
+
+- **复杂任务识别（SuccessDetector）**：任务结束时依据迭代数（≥8）与工具调用数（≥10）判定是否为「复杂成功任务」，只有复杂且成功的任务才进入沉淀流程
+- **经验沉淀（SuccessSkillGenerator）**：将成功轨迹中的关键步骤、工具选择、决策点总结为**指南型 SKILL.md**（非工具调用序列），Agent 读取后按指引弹性执行
+- **候选→正式两阶段晋升（SkillMetaManager + SkillMatcher）**：首次复杂成功先生成「候选」Skill（不立即注入）；同类复杂成功复发 ≥2 次后晋升为「正式」Skill，方可被匹配注入。避免单次偶发经验污染 Skill 库
+- **语义自动匹配（SkillMatcher）**：任务开始时，用轻量 LLM 侧路调用在正式 Skill 中查找同类经验，命中则将 Skill 内容注入当前上下文，超时/失败时静默跳过不阻塞主循环
+- **Agent 二次校验**：匹配命中的 Skill 不强制执行，交由 Agent 自主判断是否采纳——差异较大时可拒绝采用并按常规流程执行
+- **命中后降本评估（EvolutionEvaluator）**：正式 Skill 被匹配采纳后，对比本次任务实际迭代数/tokens 与同类任务历史基线——迭代降幅 ≥20% 且 token 增幅 ≤15% 才维持正式状态，否则降级；命中失败累计 ≥3 次自动废弃
+- **双路独立去重**：成功经验路径与失败补救路径独立运行、独立生成，不互相查重合并——重叠 Skill 由各自的废弃机制自然淘汰
+- **复用可观测**：成功型 Skill 的生成、晋升、命中、采纳、评估结果均写入进化记录，可通过 `ListEvolutions` / `GetEvolutionDetail` 查询
 
 ### 双层渐进式上下文压缩
 
@@ -208,7 +221,16 @@ evolution:
     min_traces_to_trigger: 10
     max_auto_skills: 20
     token_increase_threshold: 0.15
+    # 成功经验路径配置
+    success_enabled: true
+    success_iteration_threshold: 8     # 迭代数 ≥ 此值视为复杂任务
+    success_tool_call_threshold: 10    # 工具调用数 ≥ 此值视为复杂任务
+    success_promotion_recurrence: 2    # 同类成功复发达此值晋升正式
+    success_match_enabled: true        # 任务开始时做 Skill 注入匹配
+    success_match_timeout: 8.0         # 匹配侧路调用超时（秒）
+    success_iteration_reduction_threshold: 0.20  # 迭代降幅阈值
 allow_self_modification: false
+allow_self_evolution: false            # 自进化元权限开关（控制双路）
 ```
 
 
@@ -256,7 +278,7 @@ mewcode -p "帮我写一个 Python 的快速排序函数"
 | `SyntheticOutput` | 协调者模式结构化输出 |
 | `SendMessage` | 团队内消息通信 |
 
-### Harness 工具（需 allow_self_modification=true）
+### Harness 工具（需 `allow_self_modification=true`，进化工具需 `allow_self_evolution=true`）
 
 | 工具 | 功能 |
 |------|------|
@@ -532,14 +554,17 @@ MewCode Coding-Agent/
 │   │   ├── traces/                   # [数据目录] 执行轨迹 JSONL 按日分片存放处（ExecutionTraceStore 管理）
 │   │   └── evolution/                # Agent 自进化子系统
 │   │       ├── manager.py            # EvolutionManager 进化子系统门面
-│   │       ├── decision_loop.py      # EvolutionDecisionLoop 6 阶段进化决策主控
+│   │       ├── decision_loop.py      # EvolutionDecisionLoop 6+2 阶段进化决策主控（失败+成功双路）
 │   │       ├── trace_store.py        # ExecutionTraceStore + TraceCollector 执行轨迹采集
 │   │       ├── problem_classifier.py # ProblemClassifier 失败模式 LLM 分类器
 │   │       ├── skill_generator.py    # SkillGenerator 基于证据的 Skill 自动生成
-│   │       ├── evaluator.py          # EvolutionEvaluator 历史用例重放评估
+│   │       ├── success_detector.py   # SuccessDetector 复杂成功任务识别器
+│   │       ├── success_generator.py  # SuccessSkillGenerator 成功经验指南型 Skill 生成
+│   │       ├── skill_matcher.py      # SkillMatcher 语义匹配器（晋升+注入两用）
+│   │       ├── evaluator.py          # EvolutionEvaluator 历史用例重放评估（失败+成功双模式）
 │   │       ├── backup.py             # BackupManager 进化前自动备份与回滚
-│   │       ├── skill_meta.py         # SkillMetaManager 自动生成 Skill 元信息管理
-│   │       ├── models.py             # 进化系统数据模型（Trace/Pattern/Skill/Eval/Record）
+│   │       ├── skill_meta.py         # SkillMetaManager 自动生成 Skill 元信息与状态机管理
+│   │       ├── models.py             # 进化系统数据模型（Trace/Pattern/Skill/Eval/Record/SuccessSignal）
 │   │       └── tools.py              # 进化工具集（TriggerEvolution/ListEvolutions 等 5 个工具）
 │   ├── worktree/                     # Git Worktree 代码隔离沙箱
 │   │   ├── manager.py                # Worktree 生命周期管理器
