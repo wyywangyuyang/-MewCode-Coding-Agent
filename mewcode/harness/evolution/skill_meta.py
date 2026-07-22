@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import os
@@ -54,11 +55,21 @@ class SkillMetaManager:
                     self._data.setdefault("version", 1)
                     self._data.setdefault("evolution_records", {})
                     self._data.setdefault("last_updated", "")
+                    # 回填成功经验路径字段（向后兼容旧条目）
+                    for skill in self._data["skills"].values():
+                        if not isinstance(skill, dict):
+                            continue
+                        skill.setdefault("status", "active" if not skill.get("disabled") else "deprecated")
+                        skill.setdefault("path", "failure")
+                        skill.setdefault("recurrence", 0)
+                        skill.setdefault("hit_count", 0)
+                        skill.setdefault("hit_failures", 0)
+                        skill.setdefault("demoted_at", None)
                     return self._data
             except (json.JSONDecodeError, OSError) as e:
                 log.warning("[skill_meta] corrupted file, creating fresh: %s", e)
 
-        self._data = dict(DEFAULT_META)  # 深拷贝
+        self._data = copy.deepcopy(DEFAULT_META)  # 深拷贝，避免实例间共享可变字段
         self._data["last_updated"] = self._now_iso()
         self.save()
         return self._data
@@ -88,8 +99,16 @@ class SkillMetaManager:
         trace_ids: list[str] | None = None,
         evolution_id: str = "",
         failure_patterns: list[str] | None = None,
+        status: str = "active",
+        path: str = "failure",
     ) -> None:
-        """新增一个自动生成的 Skill 的元数据条目。"""
+        """新增一个自动生成的 Skill 的元数据条目。
+
+        Args:
+            status: Skill 生命周期状态（candidate/active/deprecated）。
+                成功经验路径首次生成时为 candidate；失败路径默认 active。
+            path: 进化路径来源（success/failure）。
+        """
         data = self.load()
         now = self._now_iso()
 
@@ -107,9 +126,16 @@ class SkillMetaManager:
             "failure_patterns": failure_patterns or [],
             "deprecated_at": None,
             "deprecated_by_cycle": None,
+            # 成功经验路径字段
+            "status": status,
+            "path": path,
+            "recurrence": 0,  # 同类复杂成功复发次数（candidate 晋升计数）
+            "hit_count": 0,  # 被匹配采纳次数
+            "hit_failures": 0,  # 命中采纳但任务失败次数
+            "demoted_at": None,
         }
         self.save()
-        log.info("[skill_meta] added skill: %s", skill_name)
+        log.info("[skill_meta] added skill: %s (status=%s, path=%s)", skill_name, status, path)
 
     def deprecate_skill(self, skill_name: str, cycle_id: str = "") -> bool:
         """废弃一个 Skill。
@@ -127,6 +153,7 @@ class SkillMetaManager:
 
         now = self._now_iso()
         skill["disabled"] = True
+        skill["status"] = "deprecated"
         skill["deprecated_at"] = now
         skill["deprecated_by_cycle"] = cycle_id
         skill["updated_at"] = now
@@ -146,6 +173,99 @@ class SkillMetaManager:
             log.info("[skill_meta] removed skill: %s", skill_name)
             return True
         return False
+
+    # ------------------------------------------------------------------
+    # 成功经验路径：状态机与晋升
+    # ------------------------------------------------------------------
+
+    def increment_recurrence(self, skill_name: str) -> int:
+        """候选 Skill 的同类成功复发计数 +1，返回更新后的 recurrence。"""
+        data = self.load()
+        skill = data["skills"].get(skill_name)
+        if skill is None:
+            return 0
+        skill["recurrence"] = skill.get("recurrence", 0) + 1
+        skill["updated_at"] = self._now_iso()
+        self.save()
+        log.info(
+            "[skill_meta] candidate '%s' recurrence -> %d",
+            skill_name, skill["recurrence"],
+        )
+        return skill["recurrence"]
+
+    def promote_to_active(self, skill_name: str) -> bool:
+        """将候选 Skill 晋升为正式（active）。"""
+        data = self.load()
+        skill = data["skills"].get(skill_name)
+        if skill is None:
+            return False
+        skill["status"] = "active"
+        skill["updated_at"] = self._now_iso()
+        self.save()
+        log.info("[skill_meta] promoted skill '%s' to active", skill_name)
+        return True
+
+    def demote_skill(self, skill_name: str, reason: str = "") -> bool:
+        """将 Skill 降级为废弃（命中失败累计或未降本）。"""
+        data = self.load()
+        skill = data["skills"].get(skill_name)
+        if skill is None:
+            return False
+        if skill.get("disabled"):
+            return True
+        skill["status"] = "deprecated"
+        skill["disabled"] = True
+        skill["demoted_at"] = self._now_iso()
+        skill["updated_at"] = self._now_iso()
+        self.save()
+        self._update_skill_md_deprecated(skill_name)
+        log.info("[skill_meta] demoted skill '%s': %s", skill_name, reason)
+        return True
+
+    def record_hit_result(self, skill_name: str, success: bool) -> None:
+        """记录一次命中采纳的结果。
+
+        success=True: hit_count++；success=False: hit_failures++。
+        """
+        data = self.load()
+        skill = data["skills"].get(skill_name)
+        if skill is None:
+            return
+        if success:
+            skill["hit_count"] = skill.get("hit_count", 0) + 1
+        else:
+            skill["hit_failures"] = skill.get("hit_failures", 0) + 1
+        skill["updated_at"] = self._now_iso()
+        self.save()
+
+    def check_hit_failure_candidates(self, threshold: int = 3) -> list[str]:
+        """返回命中失败次数累计超阈值的 Skill 名称列表（应降级废弃）。"""
+        data = self.load()
+        candidates: list[str] = []
+        for name, skill in data["skills"].items():
+            if skill.get("disabled"):
+                continue
+            if skill.get("hit_failures", 0) >= threshold:
+                candidates.append(name)
+        return candidates
+
+    def get_candidates(self) -> list[dict[str, Any]]:
+        """获取所有候选状态（未废弃）的 Skill。"""
+        data = self.load()
+        return [
+            s for s in data["skills"].values()
+            if not s.get("disabled") and s.get("status") == "candidate"
+        ]
+
+    def get_active_success_skills(self) -> list[dict[str, Any]]:
+        """获取所有成功路径下正式状态（未废弃）的 Skill（供匹配注入）。"""
+        data = self.load()
+        return [
+            s for s in data["skills"].values()
+            if not s.get("disabled")
+            and s.get("status") == "active"
+            and s.get("path") == "success"
+        ]
 
     # ------------------------------------------------------------------
     # 调用统计
@@ -275,6 +395,18 @@ class SkillMetaManager:
         """获取最近一次进化记录。"""
         records = self.get_evolution_records()
         return records[0] if records else None
+
+    def get_last_evolution_timestamp(self, path: str | None = None) -> float:
+        """获取最近一次进化记录的时间戳。
+
+        Args:
+            path: 仅考察指定路径（success/failure）的记录；None 表示全部。
+        """
+        records = self.get_evolution_records()
+        for r in records:
+            if path is None or r.get("path") == path:
+                return float(r.get("timestamp", 0.0))
+        return 0.0
 
     # ------------------------------------------------------------------
     # 内部

@@ -34,6 +34,10 @@ class ExecutionTrace:
     execution_time_ms: float = 0.0
     files_modified: list[str] = field(default_factory=list)
     skills_used: list[str] = field(default_factory=list)
+    # 成功经验路径所需的复杂度计数字段
+    iteration_count: int = 0  # Agent 主循环迭代轮数
+    tool_call_count: int = 0  # 工具调用总次数（非去重）
+    had_retries: bool = False  # 是否发生过重试/绕路（信息性）
 
     def __post_init__(self) -> None:
         if not self.trace_id:
@@ -77,6 +81,9 @@ class ExecutionTrace:
             "execution_time_ms": self.execution_time_ms,
             "files_modified": self.files_modified,
             "skills_used": self.skills_used,
+            "iteration_count": self.iteration_count,
+            "tool_call_count": self.tool_call_count,
+            "had_retries": self.had_retries,
         }
 
     @classmethod
@@ -94,6 +101,9 @@ class ExecutionTrace:
             execution_time_ms=d.get("execution_time_ms", 0.0),
             files_modified=d.get("files_modified", []),
             skills_used=d.get("skills_used", []),
+            iteration_count=d.get("iteration_count", 0),
+            tool_call_count=d.get("tool_call_count", 0),
+            had_retries=d.get("had_retries", False),
         )
 
 
@@ -108,6 +118,19 @@ class ProblemCategory(str, Enum):
     TOOL_MISUSE = "tool_misuse"  # 工具使用不当
     KNOWLEDGE_GAP = "knowledge_gap"  # 知识缺口
     NO_ISSUE = "no_issue"  # 无系统性问题
+
+
+# ---------------------------------------------------------------------------
+# Skill 状态机（成功经验路径）
+# ---------------------------------------------------------------------------
+
+
+class SkillStatus(str, Enum):
+    """自动生成 Skill 的生命周期状态（成功经验路径）。"""
+
+    CANDIDATE = "candidate"  # 首次成功生成，等待复发晋升
+    ACTIVE = "active"  # 已晋升，可被匹配注入
+    DEPRECATED = "deprecated"  # 已废弃（命中失败累计或长期未用）
 
 
 @dataclass
@@ -172,6 +195,44 @@ class SkillGenResult:
     success: bool = False
     errors: list[str] = field(default_factory=list)
     evidence_quoted: list[str] = field(default_factory=list)  # 引用的证据片段
+
+
+# ---------------------------------------------------------------------------
+# 成功信号（成功经验路径）
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class SuccessSignal:
+    """一次「复杂且成功」任务的信号，用于沉淀成功经验 Skill。
+
+    只有 success=True 且复杂度达标（迭代数或工具调用数超阈值）的任务
+    才会产出本信号。had_retries 仅为信息性字段，不作为过滤条件——
+    「含高成本成功」（重试/绕路后完成）同样纳入沉淀范围。
+    """
+
+    trace_id: str = ""
+    task_description: str = ""
+    iteration_count: int = 0  # Agent 主循环迭代轮数
+    tool_call_count: int = 0  # 工具调用总次数（非去重）
+    token_total: int = 0
+    had_retries: bool = False  # 是否发生过重试/绕路（信息性，不参与过滤）
+    key_steps: list[str] = field(default_factory=list)  # 关键步骤摘要
+    tools_used: list[str] = field(default_factory=list)  # 去重后的工具名
+    files_modified: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "trace_id": self.trace_id,
+            "task_description": self.task_description,
+            "iteration_count": self.iteration_count,
+            "tool_call_count": self.tool_call_count,
+            "token_total": self.token_total,
+            "had_retries": self.had_retries,
+            "key_steps": self.key_steps,
+            "tools_used": self.tools_used,
+            "files_modified": self.files_modified,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -272,6 +333,7 @@ class EvolutionRecord:
     decision: str = "skipped"  # "kept" | "rolled_back" | "skipped"
     status: str = "completed"
     error_message: str = ""
+    path: str = "failure"  # "failure" | "success" —— 进化路径来源
 
     def __post_init__(self) -> None:
         ts = time.strftime("%Y%m%d_%H%M%S", time.localtime(self.timestamp or time.time()))
@@ -293,6 +355,7 @@ class EvolutionRecord:
             "decision": self.decision,
             "status": self.status,
             "error_message": self.error_message,
+            "path": self.path,
         }
 
     @classmethod
@@ -309,6 +372,7 @@ class EvolutionRecord:
             decision=d.get("decision", "skipped"),
             status=d.get("status", "completed"),
             error_message=d.get("error_message", ""),
+            path=d.get("path", "failure"),
         )
 
 

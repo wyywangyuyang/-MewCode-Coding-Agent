@@ -400,3 +400,175 @@
 3. Cron 调度：创建一次性任务 → 等待触发 → 验证系统消息注入
 4. 向后兼容：`mewcode -p "hello"` 的行为与改造前一致
 5. 自配置安全：禁用 `allow_self_modification` 时 Agent 无法调用 Harness 工具
+
+---
+
+## 阶段五：成功经验驱动的自进化扩展
+
+> 增量扩展，不改动阶段一~四已有任务。复用现有 `harness/evolution/` 子系统，新增「成功路径」与失败路径并列。
+
+### 任务 16：成功信号识别 + 数据模型
+
+**描述**：在任务结束时识别「复杂且成功」的任务，产出成功信号；扩展进化数据模型支持成功路径与 Skill 状态机。
+
+**影响文件**：
+- `mewcode/harness/evolution/models.py` — 增强：新增 `SuccessSignal`（task_summary、iteration_count、tool_call_count、token_total、key_steps、had_retries）、`SkillStatus` 枚举（candidate/active/deprecated）、扩展 `EvolutionRecord` 增加 `path` 字段（success/failure）
+- `mewcode/harness/evolution/success_detector.py` — 新建，`SuccessDetector.detect(trace) -> SuccessSignal | None`：判定成功且复杂
+- `mewcode/harness/evolution/trace_store.py` — 增强：`TraceCollector.end_task()`（`:245`）补充记录 `success` 与复杂度计数字段，供 detector 读取
+
+**前置依赖**：无（基于现有 evolution 子系统）
+
+**参考资料定位**：
+- 现有 `harness/evolution/trace_store.py:245` `TraceCollector.end_task()` —— 当前已记录 task 边界，需扩展成功/复杂度字段
+- 现有 `harness/evolution/trace_store.py:271` `record_tool_use()`、`:289` `record_tokens()` —— 工具调用数与 token 累计的数据来源
+- 现有 `harness/evolution/models.py` —— `ExecutionTrace / EvolutionRecord` 现有结构
+
+**关键设计点**：
+- 复杂判定阈值（具体值见 checklist）：迭代数 ≥ 8 **或** 工具调用数 ≥ 10 即复杂
+- `success` 判定：end_task 时任务未被标记为失败、且产出了最终响应
+- `had_retries`：本轮是否发生过重试/绕路（用于「含高成本成功」纳入范围，不作为过滤条件）
+- 成功信号不在此阶段落盘为 Skill，仅产出数据对象供下游使用
+
+---
+
+### 任务 17：成功经验生成器
+
+**描述**：将成功信号总结为指南型 SKILL.md，复用现有 SkillGenerator 的生成与质量护栏。
+
+**影响文件**：
+- `mewcode/harness/evolution/success_generator.py` — 新建，`SuccessSkillGenerator.generate(signal) -> SkillGenResult`：调用 LLM 总结成功经验为指南型 Skill
+- `mewcode/harness/evolution/skill_generator.py` — 增强：抽出可复用的「写 SKILL.md + 注册 meta」公共逻辑，供成功路径调用
+
+**前置依赖**：任务 16
+
+**参考资料定位**：
+- 现有 `harness/evolution/skill_generator.py:166` `SkillGenerator.generate()` —— 失败路径的生成流程，成功路径复用其写文件与 meta 注册
+- 现有 `harness/evolution/skill_generator.py:128` `InsufficientEvidenceError`、`:133` `FabricatedContentError` —— 质量护栏，成功路径必须复用
+- 现有 `harness/evolution/backup.py` `BackupManager` —— 生成前备份 skills 目录的既有机制
+
+**关键设计点**：
+- 生成 prompt 语义为「总结这次复杂任务为何成功、关键步骤与决策点、可复用的经验」，区别于失败路径的「补救」语义
+- 产物为指南型 SKILL.md（非工具调用序列），强调「Agent 读取后按指引弹性执行」
+- 证据不足（如关键步骤过少）或检测到捏造内容时抛出既有异常，不生成 Skill
+- 生成后写入 `skill_meta`，初始状态为 `candidate`
+
+---
+
+### 任务 18：Skill 状态机 + 候选晋升
+
+**描述**：为 Skill 增加 candidate/active 状态机，实现「同类复杂成功复发达阈值则候选晋升为正式」。
+
+**影响文件**：
+- `mewcode/harness/evolution/skill_meta.py` — 增强：`SkillMetaManager` 支持 `status` 字段、`increment_recurrence()`、`promote_to_active()`；`add_skill()`（`:84`）接受初始状态参数
+- `mewcode/harness/evolution/decision_loop.py` — 增强：在成功路径阶段，新成功信号先尝试匹配已有候选，命中则累加复发计数，达阈值晋升
+
+**前置依赖**：任务 16、17
+
+**参考资料定位**：
+- 现有 `harness/evolution/skill_meta.py:84` `add_skill()`、`:114` `deprecate_skill()`、`:169` `increment_tasks()` —— 状态变更的既有模式
+- 现有 `harness/evolution/skill_meta.py:190` `check_deprecation_candidates()` —— 既有废弃计数机制可参照
+- 现有 `harness/evolution/decision_loop.py:178` Phase 2 Classify —— 成功路径的「先匹配已有候选」逻辑插入位置
+
+**关键设计点**：
+- 晋升阈值（具体值见 checklist）：同类复杂成功复发 ≥ 2 次晋升为 active
+- 「同类」判定复用任务 19 的语义匹配器（候选 Skill ↔ 新成功信号）
+- candidate 状态的 Skill **不参与**任务开始的注入匹配（只有 active 才注入）
+- 晋升/降级/废弃均写入 `skill_meta.json` 进化记录，`path` 字段标记为 success
+
+---
+
+### 任务 19：语义匹配器（晋升 + 注入两用）
+
+**描述**：实现基于语义的 Skill 匹配器，两处复用——成功路径匹配候选 Skill 做晋升、任务开始匹配正式 Skill 做注入。
+
+**影响文件**：
+- `mewcode/harness/evolution/skill_matcher.py` — 新建，`SkillMatcher.match_candidates(task_desc)` 与 `match_active(task_desc)`：LLM 侧路调用判断任务与 Skill 的语义相似度
+- `mewcode/agent.py` — 改造：在主循环每轮开始（`turn_start`/`pre_send` hook 位置，参考 `agent.py:441` `Agent.run()`）调用匹配器，命中 active Skill 则注入其内容到上下文
+- `mewcode/harness/evolution/decision_loop.py` — 增强：成功路径调用 `match_candidates` 做晋升判定
+
+**前置依赖**：任务 18
+
+**参考资料定位**：
+- 现有 `harness/evolution/problem_classifier.py:76` `ProblemClassifier.classify()` —— LLM 侧路调用 + 结构化输出的既有模式
+- 现有 `agent.py:441` `Agent.run()` —— 每轮迭代触发 `turn_start`/`pre_send` hook 的位置，注入点在此之后、构建 system prompt 之前
+- 现有 `app.py:1188` `_make_evolution_client()` —— 进化子系统轻量 LLM 客户端工厂，匹配器复用
+
+**关键设计点**：
+- 匹配为轻量 LLM 调用，设独立超时（具体值见 checklist，默认 8 秒）；超时/失败静默跳过，不阻塞主循环
+- 注入语义：命中的 active Skill 内容以「可用经验」形式注入上下文，并附说明「由 Agent 自主判断是否采纳」——不强制执行
+- Agent 二次校验：Agent 可在差异较大时拒绝采纳并按常规流程执行，拒绝不影响后续匹配
+- 匹配范围：`match_active` 只扫描 `status=active` 的 Skill；`match_candidates` 只扫描 `status=candidate`
+
+---
+
+### 任务 20：命中后降本评估
+
+**描述**：正式 Skill 被匹配采纳后，对比本次任务实际迭代数/token 与同类任务历史基线，判定是否降本以决定保留或降级。
+
+**影响文件**：
+- `mewcode/harness/evolution/evaluator.py` — 增强：`EvolutionEvaluator.evaluate()`（`:45`）新增成功型评估分支，输入为「命中采纳后的任务指标 + 历史基线」
+- `mewcode/harness/evolution/skill_meta.py` — 增强：记录每次命中采纳的结果（降本/未降本/任务失败），累计命中失败超阈值自动降级废弃
+
+**前置依赖**：任务 19
+
+**参考资料定位**：
+- 现有 `harness/evolution/evaluator.py:45` `EvolutionEvaluator.evaluate()` —— 失败型评估（成功率提升且 token 增幅 ≤15% 才 keep），成功型评估规则与之同构
+- 现有 `harness/evolution/skill_meta.py:190` `check_deprecation_candidates()` —— 「60 任务未用即废弃」的既有淘汰机制
+
+**关键设计点**：
+- 降本判定阈值（具体值见 checklist）：迭代数降幅 ≥ 20% **且** token 增幅 ≤ 15% 才判为降本（token 规则与失败型一致）
+- 历史基线：同类任务（未命中 Skill 时）最近 N 次的迭代数/token 均值（N 见 checklist，默认 5）；基线样本不足时不做降级，维持 active
+- 命中被采纳但任务最终失败：记一次「命中失败」，累计超阈值（见 checklist，默认 3 次）自动降级废弃
+- 评估结果写入进化记录，`path=success`
+
+---
+
+### 任务 21：接入主流程 + 进化决策循环
+
+**描述**：将成功路径接入现有 `EvolutionDecisionLoop` 与 App 退出清理流程，使会话结束时自动跑「失败 + 成功」双路进化检查；任务开始时自动跑 Skill 注入匹配。
+
+**影响文件**：
+- `mewcode/harness/evolution/manager.py` — 改造：`check_and_evolve()`（`:113`）在失败路径后追加成功路径阶段；`_check_deprecations()`（`:150`）覆盖成功型 Skill 的降级/废弃
+- `mewcode/harness/evolution/decision_loop.py` — 改造：`run()`（`:91`）新增成功路径阶段（与现有 6 阶段并列，不替换）
+- `mewcode/app.py` — 改造：`_init_evolution`（`:1137`）实例化新增组件并注入；退出清理（`:2162-2169`）的 `check_and_evolve` 自动覆盖双路
+- `mewcode/agent.py` — 改造：主循环注入任务 19 的匹配结果
+- `mewcode/config.py` — 增强：新增成功经验相关配置项（开关、阈值，见 checklist）
+- `mewcode/validator.py` — 增强：校验新增配置项
+
+**前置依赖**：任务 16~20
+
+**参考资料定位**：
+- 现有 `app.py:1137` `_init_evolution()`、`:1157` EvolutionManager 创建、`:1168-1174` 进化工具注册、`:2162-2169` 退出清理调用 `check_and_evolve`
+- 现有 `manager.py:113` `check_and_evolve()`、`:150` `_check_deprecations()`
+- 现有 `decision_loop.py:91` `run()` 6 阶段结构
+- 现有 `config.py:177` `allow_self_modification`、`validator.py:280` 校验模式 —— 成功经验开关复用 `allow_self_evolution`，不新增元权限
+
+**关键设计点**：
+- 成功路径整体受 `allow_self_evolution` 控制，关闭时完全不执行（不识别、不生成、不匹配、不注入）
+- 成功路径与失败路径在同一 `check_and_evolve` 调用内顺序执行，互不依赖、互不查重
+- 注入匹配（任务开始）与进化检查（会话结束）解耦：匹配在 Agent 主循环内即时进行，进化检查在退出时批量进行
+- 单组件实例化失败不阻塞其他组件（沿用 `app.py:1071` 异常隔离模式）
+
+---
+
+### 任务 22：端到端验证
+
+**描述**：覆盖成功经验路径全生命周期的端到端验证——识别、生成、晋升、匹配注入、降本评估、降级废弃。
+
+**影响文件**：
+- `tests/test_evolution_success.py` — 新建，测试：复杂成功识别、候选生成、复发晋升、命中注入、降本保留、命中失败降级
+- `tests/test_evolution_matcher.py` — 新建，测试：候选/正式匹配范围、超时静默、Agent 二次校验拒绝路径
+- `tests/test_evolution_e2e.py` — 新建，端到端：跑两轮同类复杂成功任务 → 验证候选生成与晋升 → 第三轮任务开始命中注入 → 验证降本保留
+
+**前置依赖**：任务 21
+
+**参考资料定位**：
+- 现有 `harness/evolution/` 各组件公开 API（任务 16~20 产出）
+- 现有项目测试目录结构、`pyproject.toml` 的 pytest 配置
+
+**关键验证场景**（详见 checklist.md「成功经验驱动的自进化」节）：
+1. 简单任务（迭代数 < 阈值）成功 → 不生成候选
+2. 复杂任务成功 → 生成候选；同类复发 → 晋升正式
+3. 正式 Skill 在任务开始被命中注入；Agent 拒绝采纳时常规流程不受影响
+4. 命中采纳后降本 → 维持正式；命中失败累计 → 降级废弃
+5. `allow_self_evolution=false` 时成功路径完全不触发

@@ -269,10 +269,29 @@ class TraceCollector:
         self._completed_count += 1
 
     def record_tool_use(self, trace_id: str, tool_name: str) -> None:
-        """记录一次工具使用。"""
+        """记录一次工具使用。
+
+        tools_used 保留去重后的工具名清单；tool_call_count 累计总调用次数
+        （供成功经验路径判定任务复杂度）。
+        """
         trace = self._active.get(trace_id)
-        if trace and tool_name not in trace.tools_used:
+        if not trace:
+            return
+        trace.tool_call_count += 1
+        if tool_name not in trace.tools_used:
             trace.tools_used.append(tool_name)
+
+    def record_iteration(self, trace_id: str) -> None:
+        """记录一次 Agent 主循环迭代（供成功经验路径判定复杂度）。"""
+        trace = self._active.get(trace_id)
+        if trace:
+            trace.iteration_count += 1
+
+    def record_retry(self, trace_id: str) -> None:
+        """标记本轮任务发生过重试/绕路（信息性，不影响复杂度判定）。"""
+        trace = self._active.get(trace_id)
+        if trace:
+            trace.had_retries = True
 
     def record_skill_use(self, trace_id: str, skill_name: str) -> None:
         """记录一次 Skill 使用。"""

@@ -1185,6 +1185,12 @@ class MewCodeApp(App):
 
         _log.info("[evolution] tools: %d registered, %d failed", _registered, _failed)
 
+        # 将进化子系统注入 Agent，供成功经验路径做 trace 收集、Skill 注入与命中评估
+        if getattr(self, "agent", None) is not None:
+            self.agent.evolution_manager = self.evolution_manager
+            _log.info("[evolution] wired into agent (success path enabled=%s)",
+                      self.evolution_manager.success_enabled)
+
     def _make_evolution_client(self):
         """创建一个轻量级 LLM 客户端工厂，供进化子系统使用。"""
         from mewcode.tools.base import TextDelta, StreamEnd

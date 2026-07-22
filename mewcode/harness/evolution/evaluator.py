@@ -26,6 +26,10 @@ REPLAY_TIMEOUT = 120
 # 最多重放的 trace 数量
 MAX_REPLAY_TRACES = 10
 
+# 成功经验路径评估阈值
+SUCCESS_ITERATION_REDUCTION_THRESHOLD = 0.20  # 迭代数降幅 ≥ 20% 才算降本
+SUCCESS_BASELINE_MIN_SAMPLES = 5  # 基线样本不足此数时不做降级
+
 
 class EvolutionEvaluator:
     """进化效果评估器。
@@ -130,6 +134,124 @@ class EvolutionEvaluator:
 
         log.info("[evaluator] decision=%s reason=%s", decision, reason)
         return result
+
+    # ------------------------------------------------------------------
+    # 成功经验路径评估
+    # ------------------------------------------------------------------
+
+    def compute_success_baseline(
+        self,
+        traces: list[ExecutionTrace],
+    ) -> dict[str, Any]:
+        """从同类任务（未命中 Skill 时）的轨迹计算历史基线。
+
+        基线 = 最近 N 次同类成功任务的迭代数/token 均值。
+        样本不足 SUCCESS_BASELINE_MIN_SAMPLES 时返回 sample_count=0，
+        供调用方判定「不做降级」。
+        """
+        successes = [t for t in traces if t.success]
+        if not successes:
+            return {"sample_count": 0, "avg_iteration_count": 0.0, "avg_tokens": 0.0}
+
+        recent = successes[-SUCCESS_BASELINE_MIN_SAMPLES * 2:]  # 多取一些再截断
+        recent = recent[-SUCCESS_BASELINE_MIN_SAMPLES * 2:]
+        avg_iter = sum(t.iteration_count for t in recent) / len(recent)
+        avg_tokens = sum(t.total_tokens for t in recent) / len(recent)
+        return {
+            "sample_count": len(recent),
+            "avg_iteration_count": avg_iter,
+            "avg_tokens": avg_tokens,
+        }
+
+    def evaluate_success(
+        self,
+        task_iteration_count: int,
+        task_token_total: int,
+        baseline: dict[str, Any],
+    ) -> EvalResult:
+        """成功型 Skill 命中采纳后的降本评估。
+
+        判定规则（与失败型 token 阈值一致）：
+        - 基线样本不足 → keep（不降级，维持 active）
+        - 迭代数降幅 ≥ 20% 且 token 增幅 ≤ 15% → keep
+        - 否则 → rollback（降级）
+
+        Args:
+            task_iteration_count: 命中采纳后该次任务的迭代轮数。
+            task_token_total: 命中采纳后该次任务的 token 总量。
+            baseline: compute_success_baseline 的返回值。
+        """
+        sample_count = baseline.get("sample_count", 0)
+        if sample_count < SUCCESS_BASELINE_MIN_SAMPLES:
+            return EvalResult(
+                decision="keep",
+                reason=(
+                    f"Insufficient baseline samples ({sample_count} < "
+                    f"{SUCCESS_BASELINE_MIN_SAMPLES}), keeping active without demotion"
+                ),
+                details={
+                    "path": "success",
+                    "baseline_sample_count": sample_count,
+                    "task_iteration_count": task_iteration_count,
+                    "task_token_total": task_token_total,
+                },
+            )
+
+        baseline_iter = float(baseline.get("avg_iteration_count", 0.0))
+        baseline_tokens = float(baseline.get("avg_tokens", 0.0))
+
+        iter_reduction = self._calc_reduction_pct(baseline_iter, task_iteration_count)
+        token_change = self._calc_change_pct(baseline_tokens, task_token_total)
+
+        iter_improved = iter_reduction >= SUCCESS_ITERATION_REDUCTION_THRESHOLD
+        token_acceptable = token_change <= self._threshold
+
+        if iter_improved and token_acceptable:
+            decision = "keep"
+            reason = (
+                f"Iteration reduced {iter_reduction:.0%} (>= {SUCCESS_ITERATION_REDUCTION_THRESHOLD:.0%}), "
+                f"token change {token_change:+.1%} (<= {self._threshold:.0%})"
+            )
+        elif not iter_improved:
+            decision = "rollback"
+            reason = (
+                f"Iteration reduction {iter_reduction:.0%} below threshold "
+                f"({SUCCESS_ITERATION_REDUCTION_THRESHOLD:.0%})"
+            )
+        else:
+            decision = "rollback"
+            reason = (
+                f"Token increase {token_change:+.1%} exceeds threshold "
+                f"({self._threshold:.0%})"
+            )
+
+        result = EvalResult(
+            avg_tokens_before=baseline_tokens,
+            avg_tokens_after=task_token_total,
+            token_change_pct=token_change,
+            decision=decision,
+            reason=reason,
+            details={
+                "path": "success",
+                "baseline_sample_count": sample_count,
+                "baseline_avg_iteration_count": baseline_iter,
+                "task_iteration_count": task_iteration_count,
+                "iteration_reduction": iter_reduction,
+                "task_token_total": task_token_total,
+            },
+        )
+        log.info(
+            "[evaluator][success] iter_reduction=%.0f%% token_change=%+.1f%% decision=%s",
+            iter_reduction * 100, token_change * 100, decision,
+        )
+        return result
+
+    @staticmethod
+    def _calc_reduction_pct(baseline: float, actual: float) -> float:
+        """计算降幅百分比（baseline - actual）/ baseline。"""
+        if baseline <= 0:
+            return 0.0
+        return (baseline - actual) / baseline
 
     # ------------------------------------------------------------------
     # 指标计算

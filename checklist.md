@@ -235,3 +235,69 @@
 - [ ] **SEC-1**：`allow_self_modification = false` → Agent 执行 "add a hook to log all tool calls" → Agent 尝试调用 AddHookTool → 权限拒绝 → Agent 被告知无法执行
 - [ ] **SEC-2**：Bash 工具限流为 10/min → Agent 执行 15 次 Bash 命令 → 前 10 次成功，后 5 次被限流拒绝 → Agent 被告知速率限制原因
 - [ ] **SEC-3**：Agent 尝试通过 `UpdateConfigTool` 将 `allow_self_modification` 改为 true → 该操作本身被权限检查拦截（不允许递归提升权限）
+
+---
+
+## 成功经验驱动的自进化
+
+> 阈值/默认值集中在此节作为验收项。每项可勾选、可观测，检查方法写在括号里。
+
+### 配置项与开关
+- [ ] `evolution.success.enabled` 默认值为 false（`grep "success.*enabled.*False\|success.*enabled.*false" mewcode/config.py` 返回 ≥1）
+- [ ] `evolution.success.enabled = false` 时，成功路径完全不触发——无候选生成、无匹配注入（日志中无 `[evolution][success]` 输出）
+- [ ] 成功路径受 `allow_self_evolution` 控制：该开关为 false 时即使 `success.enabled=true` 也不执行（日志中 `[evolution][success] skipped: self-evolution disabled`）
+- [ ] 新增配置项经 `validator.py` 校验：非法类型/越界值启动报错（`grep "success" mewcode/validator.py` 返回 ≥1）
+
+### 复杂任务识别
+- [ ] 迭代数阈值默认 8（`grep "iteration.*8\|8.*iteration" mewcode/harness/evolution/success_detector.py` 上下文命中）
+- [ ] 工具调用数阈值默认 10（`grep "tool_call.*10\|10.*tool_call" mewcode/harness/evolution/success_detector.py` 上下文命中）
+- [ ] 迭代数 < 8 且工具调用数 < 10 的任务即使成功也不产出 SuccessSignal（单元测试：5 轮迭代 / 4 次工具调用 → `detect()` 返回 None）
+- [ ] 迭代数 ≥ 8（即使工具调用数 < 10）的成功任务产出 SuccessSignal（单元测试：8 轮迭代 / 3 次工具调用 → `detect()` 非 None）
+- [ ] 失败任务不产出 SuccessSignal（单元测试：标记 success=False → `detect()` 返回 None）
+- [ ] SuccessSignal 含 `had_retries` 字段：发生重试的任务成功后仍产出信号（验证「含高成本成功」纳入范围）
+
+### 候选 Skill 生成
+- [ ] 复杂成功任务产出候选 Skill，写入 skills 目录且 `skill_meta.json` 中 `status="candidate"`（`jq '.skills[] | select(.status=="candidate")' .mewcode/skill_meta.json` 返回结果）
+- [ ] 候选 Skill 为指南型 SKILL.md（文件含「步骤/经验/指引」语义，非工具调用序列日志）
+- [ ] 证据不足时抛出 `InsufficientEvidenceError`，不生成 Skill（单元测试：key_steps 过少 → 断言抛出）
+- [ ] 检测到捏造内容时抛出 `FabricatedContentError`，不生成 Skill（单元测试：mock 返回含未出现于 trace 的步骤 → 断言抛出）
+- [ ] 生成前 skills 目录被 BackupManager 备份（日志中 `[evolution][success] backup created`）
+
+### 候选晋升
+- [ ] 晋升阈值默认 2：同类复杂成功复发 ≥ 2 次后候选升为 active（`grep "recurrence.*2\|2.*recurrence" mewcode/harness/evolution/skill_meta.py` 上下文命中）
+- [ ] 首次成功生成候选后 `recurrence=1`，状态仍为 candidate（`jq` 验证 status=candidate, recurrence=1）
+- [ ] 同类第二次成功匹配到已有候选 → `recurrence=2` → 状态升为 active（`jq` 验证 status=active）
+- [ ] 「同类」判定走 SkillMatcher.match_candidates：非同类的新成功生成新候选而非误累加（单元测试：两个语义不同的复杂任务 → 两条候选记录，各自 recurrence=1）
+- [ ] candidate 状态的 Skill 不参与任务开始的注入匹配（任务 19 的 match_active 扫描结果不含 candidate）
+
+### 语义匹配与注入
+- [ ] `SkillMatcher.match_active(task_desc)` 只返回 `status=active` 的 Skill（单元测试：1 active + 2 candidate → 仅返回 active）
+- [ ] 匹配为轻量 LLM 侧路调用，超时默认 8 秒（`grep "timeout.*8" mewcode/harness/evolution/skill_matcher.py` 返回 ≥1）
+- [ ] 匹配超时/失败时静默跳过，不阻塞主循环、不抛异常到 Agent.run（单元测试：mock 匹配超时 → 主循环正常继续）
+- [ ] 命中 active Skill 时，其内容以「可用经验」形式注入上下文（对话/trace 中可见注入的 SKILL.md 摘要）
+- [ ] 注入内容含「由 Agent 自主判断是否采纳」说明，不强制执行（检查注入文本）
+- [ ] Agent 二次校验拒绝采纳时，常规流程不受影响（trace 中 Skill 未被引用、任务正常完成）
+- [ ] 无 active Skill 或未命中时，任务开始无注入、行为与未开启功能时一致
+
+### 命中后降本评估
+- [ ] 降本判定：迭代数降幅 ≥ 20% 且 token 增幅 ≤ 15% 才判为降本（`grep "0.2\|20" mewcode/harness/evolution/evaluator.py` 与 `grep "0.15\|15" mewcode/harness/evolution/evaluator.py` 上下文命中）
+- [ ] 历史基线样本数默认 5：同类任务最近 5 次未命中时的迭代数/token 均值（`grep "baseline.*5\|5.*baseline" mewcode/harness/evolution/evaluator.py` 上下文命中）
+- [ ] 基线样本不足（< 5）时不做降级，维持 active（单元测试：仅 2 条历史 → 评估返回 keep，不降级）
+- [ ] 命中采纳后降本 → 维持 active，记录 `eval=keep`（`jq '.evolution_records[] | select(.path=="success" and .eval=="keep")'` 返回结果）
+- [ ] 命中采纳后未降本 → 降级（记录 `eval=demote`）
+- [ ] 命中被采纳但任务失败 → 记一次 hit_failure；累计 ≥ 3 次自动降级废弃（`grep "hit_failure.*3\|3.*hit_failure" mewcode/harness/evolution/skill_meta.py` 上下文命中）
+- [ ] 成功型 Skill 沿用「60 任务未用即废弃」机制（`check_deprecation_candidates` 覆盖 success 路径 Skill）
+
+### 双路独立与可观测
+- [ ] 同一会话 `check_and_evolve` 同时跑失败路径与成功路径，两路均写入进化记录且 `path` 字段区分（`jq '.evolution_records | group_by(.path) | map({path: .[0].path, n: length})'` 含 success 与 failure 两组）
+- [ ] 成功路径与失败路径不互相查重合并（同一任务既有失败补救 Skill 又有成功经验 Skill 时，两条记录共存）
+- [ ] `ListAutoSkillsTool` 可列出成功型 Skill 及其 status/recurrence/hit_count（调用工具 → 返回含 candidate/active 标记的列表）
+- [ ] `ListEvolutionsTool` / `GetEvolutionDetailTool` 可查看成功路径进化记录（调用工具 → 返回 path=success 的记录）
+
+### 端到端验证
+- [ ] **EVO-S1**：跑一轮简单任务（< 阈值）成功 → `skill_meta.json` 无新候选（`jq '.skills | length'` 不变）
+- [ ] **EVO-S2**：跑两轮同类复杂成功任务 → 第一轮生成候选（recurrence=1）→ 第二轮晋升 active（recurrence=2, status=active）
+- [ ] **EVO-S3**：第三轮同类任务开始时命中 active Skill 并注入 → Agent 采纳 → 任务成功且迭代数/token 低于历史基线 → 评估 keep
+- [ ] **EVO-S4**：命中注入后 Agent 拒绝采纳（任务与 Skill 差异较大）→ 常规流程完成、不被记为 hit_failure
+- [ ] **EVO-S5**：连续 3 次命中采纳但任务失败 → 该 Skill 自动降级废弃（`jq` 验证 status=deprecated）
+- [ ] **EVO-S6**：`allow_self_evolution=false` 时，即使复杂成功多次复发也不生成候选、不注入（`skill_meta.json` 无 success 路径记录）

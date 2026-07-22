@@ -26,6 +26,7 @@ from mewcode.harness.evolution.models import (
     FailurePattern,
     SkillGenResult,
     SkipEvolutionError,
+    SuccessSignal,
 )
 from mewcode.harness.evolution.backup import BackupManager
 from mewcode.harness.evolution.trace_store import ExecutionTraceStore
@@ -36,6 +37,9 @@ from mewcode.harness.evolution.skill_generator import (
     InsufficientEvidenceError,
 )
 from mewcode.harness.evolution.evaluator import EvolutionEvaluator
+from mewcode.harness.evolution.success_detector import SuccessDetector
+from mewcode.harness.evolution.success_generator import SuccessSkillGenerator
+from mewcode.harness.evolution.skill_matcher import SkillMatcher
 
 log = logging.getLogger(__name__)
 
@@ -70,6 +74,11 @@ class EvolutionDecisionLoop:
         min_traces: int = 30,
         max_traces: int = 50,
         min_recurrence: int = 3,
+        # 成功经验路径组件（可选）
+        success_detector: SuccessDetector | None = None,
+        success_generator: SuccessSkillGenerator | None = None,
+        skill_matcher: SkillMatcher | None = None,
+        success_promotion_recurrence: int = 2,
     ) -> None:
         self._trace_store = trace_store
         self._classifier = classifier
@@ -81,8 +90,139 @@ class EvolutionDecisionLoop:
         self._max_traces = max_traces
         self._min_recurrence = min_recurrence
 
+        # 成功经验路径
+        self._success_detector = success_detector
+        self._success_gen = success_generator
+        self._skill_matcher = skill_matcher
+        self._promotion_recurrence = success_promotion_recurrence
+
         self._last_evolution: EvolutionRecord | None = None
         self._history: list[EvolutionRecord] = []
+
+    # ------------------------------------------------------------------
+    # 成功经验路径入口
+    # ------------------------------------------------------------------
+
+    async def run_success_path(self) -> EvolutionRecord | None:
+        """执行成功经验路径：识别复杂成功 → 匹配候选晋升 / 生成新候选。
+
+        与失败路径独立——不互相依赖、不互相查重。仅处理自上次成功进化
+        以来的新轨迹，避免重复处理。
+        """
+        if self._success_detector is None or self._success_gen is None:
+            return None
+
+        cutoff = self._skill_meta_mgr.get_last_evolution_timestamp(path="success")
+        traces = self._trace_store.get_latest(self._max_traces)
+
+        new_signals: list[tuple[ExecutionTrace, SuccessSignal]] = []
+        for t in traces:
+            if cutoff and t.timestamp <= cutoff:
+                continue
+            signal = self._success_detector.detect(t)
+            if signal is not None:
+                new_signals.append((t, signal))
+
+        if not new_signals:
+            log.info("[decision_loop][success] no new complex-success signals")
+            return self._make_skip_record(reason="No new complex-success signals", path="success")
+
+        log.info(
+            "[decision_loop][success] processing %d new complex-success signals",
+            len(new_signals),
+        )
+
+        # 备份 skills 目录
+        backup_id = ""
+        if self._success_gen is not None:
+            backup_id = self._backup_mgr.backup_directory(
+                self._success_gen._skills_dir, f"success_{int(traces[0].timestamp) if traces else 0}"
+            )
+
+        skills_created: list[str] = []
+        skills_promoted: list[str] = []
+
+        for trace, signal in new_signals:
+            # 先尝试匹配已有候选（晋升判定）
+            matched = None
+            if self._skill_matcher is not None:
+                try:
+                    matched = await self._skill_matcher.match_candidates(
+                        signal.task_description
+                    )
+                except Exception as e:
+                    log.warning("[decision_loop][success] candidate match failed: %s", e)
+
+            if matched is not None:
+                name = matched.get("name", "")
+                if name:
+                    recurrence = self._skill_meta_mgr.increment_recurrence(name)
+                    if recurrence >= self._promotion_recurrence:
+                        self._skill_meta_mgr.promote_to_active(name)
+                        skills_promoted.append(name)
+                        log.info(
+                            "[decision_loop][success] promoted '%s' (recurrence=%d)",
+                            name, recurrence,
+                        )
+                continue
+
+            # 未命中候选 → 生成新候选 Skill
+            try:
+                result = await self._success_gen.generate(signal, trace)
+                if result.success:
+                    self._skill_meta_mgr.add_skill(
+                        skill_name=result.skill_name,
+                        description=(
+                            f"Auto-generated success experience: {signal.task_description[:80]}"
+                        ),
+                        trace_ids=result.based_on_traces,
+                        evolution_id=f"success_{int(trace.timestamp)}",
+                        status="candidate",
+                        path="success",
+                    )
+                    # 创建即代表观察到 1 次同类成功
+                    self._skill_meta_mgr.increment_recurrence(result.skill_name)
+                    skills_created.append(result.skill_name)
+                    log.info(
+                        "[decision_loop][success] generated candidate '%s'",
+                        result.skill_name,
+                    )
+                else:
+                    log.warning(
+                        "[decision_loop][success] candidate gen failed for '%s': %s",
+                        result.skill_name, result.errors,
+                    )
+            except InsufficientEvidenceError as e:
+                log.info("[decision_loop][success] skipping signal %s: %s", signal.trace_id, e)
+            except Exception as e:
+                log.error("[decision_loop][success] error generating candidate: %s", e)
+
+        # 成功路径默认保留生成结果（候选不注入，无副作用），提交备份
+        if backup_id:
+            self._backup_mgr.commit(backup_id)
+
+        record = EvolutionRecord(
+            traces_analyzed=[sig.trace_id for _, sig in new_signals],
+            problems_found=len(new_signals),
+            patterns=[],
+            skills_created=skills_created,
+            skills_deprecated=[],
+            eval_result={},
+            decision="kept",
+            status="completed",
+            error_message="",
+            path="success",
+        )
+        record_dict = record.to_dict()
+        if skills_promoted:
+            record_dict["skills_promoted"] = skills_promoted
+        self._skill_meta_mgr.add_evolution_record(record_dict)
+        self._history.append(record)
+        log.info(
+            "[decision_loop][success] archived: %d created, %d promoted",
+            len(skills_created), len(skills_promoted),
+        )
+        return record
 
     # ------------------------------------------------------------------
     # 主入口
@@ -367,7 +507,7 @@ class EvolutionDecisionLoop:
     # ------------------------------------------------------------------
 
     def _make_skip_record(
-        self, traces_read: int = 0, reason: str = ""
+        self, traces_read: int = 0, reason: str = "", path: str = "failure"
     ) -> EvolutionRecord:
         """生成跳过记录。"""
         return EvolutionRecord(
@@ -375,15 +515,17 @@ class EvolutionDecisionLoop:
             decision="skipped",
             status="skipped",
             error_message=reason,
+            path=path,
         )
 
-    def _make_error_record(self, error: str = "") -> EvolutionRecord:
+    def _make_error_record(self, error: str = "", path: str = "failure") -> EvolutionRecord:
         """生成错误记录。"""
         return EvolutionRecord(
             traces_analyzed=[],
             decision="rolled_back",
             status="failed",
             error_message=error,
+            path=path,
         )
 
 

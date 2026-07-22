@@ -223,6 +223,16 @@ def validate_evolution(raw_evo: dict | None) -> dict:
         "min_failure_recurrence": 3,
         "token_increase_threshold": 0.15,
         "deprecation_task_threshold": 60,
+        # 成功经验路径
+        "success_enabled": False,
+        "success_iteration_threshold": 8,
+        "success_tool_call_threshold": 10,
+        "success_promotion_recurrence": 2,
+        "success_match_enabled": True,
+        "success_match_timeout": 8.0,
+        "success_baseline_samples": 5,
+        "success_iteration_reduction_threshold": 0.20,
+        "success_hit_failure_threshold": 3,
     }
 
     if raw_evo is None:
@@ -231,20 +241,34 @@ def validate_evolution(raw_evo: dict | None) -> dict:
     if not isinstance(raw_evo, dict):
         raise ConfigError("'evolution' must be a mapping")
 
+    # 兼容嵌套 success 子映射：evolution.success.<key> → evolution.success_<key>
+    nested_success = raw_evo.get("success")
+    if isinstance(nested_success, dict):
+        for k, v in nested_success.items():
+            flat_key = f"success_{k}"
+            if flat_key in defaults and flat_key not in raw_evo:
+                raw_evo = {**raw_evo, flat_key: v}
+
     result: dict = {}
     for key, default_val in defaults.items():
         val = raw_evo.get(key, default_val)
         if key in ("min_traces_trigger", "max_traces_per_evolution",
                     "min_traces_per_evolution", "min_failure_recurrence",
-                    "deprecation_task_threshold"):
+                    "deprecation_task_threshold",
+                    "success_iteration_threshold", "success_tool_call_threshold",
+                    "success_promotion_recurrence", "success_baseline_samples",
+                    "success_hit_failure_threshold"):
             if not isinstance(val, int) or val <= 0:
                 raise ConfigError(f"'evolution.{key}' must be a positive integer, got {val!r}")
-        elif key == "token_increase_threshold":
+        elif key in ("token_increase_threshold", "success_iteration_reduction_threshold"):
             if not isinstance(val, (int, float)) or val <= 0 or val > 1:
                 raise ConfigError(
                     f"'evolution.{key}' must be a float between 0 and 1, got {val!r}"
                 )
-        elif key == "enabled":
+        elif key == "success_match_timeout":
+            if not isinstance(val, (int, float)) or val <= 0:
+                raise ConfigError(f"'evolution.{key}' must be a positive number, got {val!r}")
+        elif key in ("enabled", "success_enabled", "success_match_enabled"):
             if not isinstance(val, bool):
                 raise ConfigError(f"'evolution.{key}' must be a boolean, got {val!r}")
         result[key] = val

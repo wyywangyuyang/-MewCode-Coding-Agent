@@ -157,6 +157,16 @@ class EvolutionConfig:
     traces_dir: str = "harness/traces"
     skills_dir: str = "harness/skills"
     skill_meta_file: str = "harness/skills/skill_meta.json"
+    # 成功经验路径配置
+    success_enabled: bool = False
+    success_iteration_threshold: int = 8  # 迭代数 ≥ 此值视为复杂
+    success_tool_call_threshold: int = 10  # 工具调用数 ≥ 此值视为复杂
+    success_promotion_recurrence: int = 2  # 同类成功复发达此值晋升正式
+    success_match_enabled: bool = True  # 任务开始时是否做 Skill 注入匹配
+    success_match_timeout: float = 8.0  # 匹配侧路调用超时（秒）
+    success_baseline_samples: int = 5  # 降本评估的历史基线样本数
+    success_iteration_reduction_threshold: float = 0.20  # 迭代降幅阈值
+    success_hit_failure_threshold: int = 3  # 命中失败累计达此值降级
 
 
 @dataclass
@@ -254,6 +264,15 @@ def _load_single_file(path: Path) -> AppConfig:
             min_failure_recurrence=validated.get("evolution", {}).get("min_failure_recurrence", 3),
             token_increase_threshold=validated.get("evolution", {}).get("token_increase_threshold", 0.15),
             deprecation_task_threshold=validated.get("evolution", {}).get("deprecation_task_threshold", 60),
+            success_enabled=validated.get("evolution", {}).get("success_enabled", False),
+            success_iteration_threshold=validated.get("evolution", {}).get("success_iteration_threshold", 8),
+            success_tool_call_threshold=validated.get("evolution", {}).get("success_tool_call_threshold", 10),
+            success_promotion_recurrence=validated.get("evolution", {}).get("success_promotion_recurrence", 2),
+            success_match_enabled=validated.get("evolution", {}).get("success_match_enabled", True),
+            success_match_timeout=validated.get("evolution", {}).get("success_match_timeout", 8.0),
+            success_baseline_samples=validated.get("evolution", {}).get("success_baseline_samples", 5),
+            success_iteration_reduction_threshold=validated.get("evolution", {}).get("success_iteration_reduction_threshold", 0.20),
+            success_hit_failure_threshold=validated.get("evolution", {}).get("success_hit_failure_threshold", 3),
         ),
     )
 

@@ -19,6 +19,8 @@ from mewcode.harness.evolution.models import (
     FailurePattern,
     ProblemCategory,
     SkillGenResult,
+    SkillStatus,
+    SuccessSignal,
 )
 from mewcode.harness.evolution.backup import BackupManager
 from mewcode.harness.evolution.trace_store import ExecutionTraceStore, TraceCollector
@@ -28,6 +30,9 @@ from mewcode.harness.evolution.skill_generator import SkillGenerator
 from mewcode.harness.evolution.evaluator import EvolutionEvaluator
 from mewcode.harness.evolution.decision_loop import EvolutionDecisionLoop
 from mewcode.harness.evolution.manager import EvolutionManager
+from mewcode.harness.evolution.success_detector import SuccessDetector
+from mewcode.harness.evolution.success_generator import SuccessSkillGenerator
+from mewcode.harness.evolution.skill_matcher import SkillMatcher
 from mewcode.harness.evolution.tools import (
     TriggerEvolutionTool,
     ListEvolutionsTool,
@@ -46,6 +51,8 @@ __all__ = [
     "FailurePattern",
     "ProblemCategory",
     "SkillGenResult",
+    "SkillStatus",
+    "SuccessSignal",
     # Core
     "BackupManager",
     "ExecutionTraceStore",
@@ -55,6 +62,9 @@ __all__ = [
     "ProblemClassifier",
     "SkillGenerator",
     "EvolutionEvaluator",
+    "SuccessDetector",
+    "SuccessSkillGenerator",
+    "SkillMatcher",
     # Orchestration
     "EvolutionDecisionLoop",
     "EvolutionManager",

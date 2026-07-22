@@ -193,11 +193,27 @@ class ListAutoSkillsTool(Tool):
             call_count = s.get("call_count", 0)
             tasks_since = s.get("tasks_since_last_call", 0)
             disabled = s.get("disabled", False)
-            status = "DEPRECATED" if disabled else "ACTIVE"
-            lines.append(
+            path = s.get("path", "failure")
+            life_status = s.get("status", "active")
+            if disabled:
+                status = "DEPRECATED"
+            elif path == "success":
+                status = life_status.upper()  # CANDIDATE / ACTIVE
+            else:
+                status = "ACTIVE"
+            base = (
                 f"  [{status}] {name} — called {call_count} times, "
                 f"{tasks_since} tasks since last use"
             )
+            if path == "success":
+                recurrence = s.get("recurrence", 0)
+                hit_count = s.get("hit_count", 0)
+                hit_failures = s.get("hit_failures", 0)
+                base += (
+                    f" | path=success recurrence={recurrence} "
+                    f"hits={hit_count} hit_failures={hit_failures}"
+                )
+            lines.append(base)
 
         return ToolResult(output="\n".join(lines))
 

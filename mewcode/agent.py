@@ -316,6 +316,8 @@ class Agent:
         audit_logger: Any = None,
         rate_limiter: Any = None,
         metrics_collector: Any = None,
+        # === Evolution Engineering 新增（成功经验路径） ===
+        evolution_manager: Any = None,
     ) -> None:
         self.client = client
         self.registry = registry
@@ -361,6 +363,11 @@ class Agent:
         self.audit_logger = audit_logger
         self.rate_limiter = rate_limiter
         self.metrics_collector = metrics_collector
+        # Evolution Engineering（成功经验路径：trace 收集 + Skill 注入 + 命中评估）
+        self.evolution_manager = evolution_manager
+        self._evo_trace_id: str | None = None
+        self._evo_injected_skill: str | None = None
+        self._evo_task_succeeded: bool = False
 
     @property
     def _transcript_path(self) -> str:
@@ -461,6 +468,22 @@ class Agent:
         max_tokens_escalated = False
         output_recoveries = 0
 
+        # 成功经验路径：开启一个 trace 收集任务，并尝试注入匹配到的正式 Skill
+        self._evo_trace_id = None
+        self._evo_injected_skill = None
+        self._evo_task_succeeded = False
+        if self.evolution_manager is not None:
+            try:
+                task_desc = self._infer_task_description(conversation)
+                self._evo_trace_id = (
+                    self.evolution_manager.trace_collector.start_task(
+                        task_desc, session_id=self.session_id
+                    )
+                )
+            except Exception as e:
+                log.debug("[evolution] start_task failed: %s", e)
+                self._evo_trace_id = None
+
         while True:
             iteration += 1
 
@@ -470,11 +493,24 @@ class Agent:
                 )
                 break
 
+            # 成功经验路径：记录迭代轮数（供复杂度判定）
+            if self._evo_trace_id:
+                try:
+                    self.evolution_manager.trace_collector.record_iteration(
+                        self._evo_trace_id
+                    )
+                except Exception as e:
+                    log.debug("[evolution] record_iteration failed: %s", e)
+
             if self.hook_engine:
                 ctx = self._build_hook_context("turn_start")
                 await self.hook_engine.run_hooks("turn_start", ctx)
                 for he in self._drain_hook_events():
                     yield he
+
+            # 成功经验路径：首轮迭代尝试注入匹配到的正式 Skill（Agent 自主决定是否采纳）
+            if iteration == 1 and self._evo_trace_id and self.evolution_manager is not None:
+                await self._maybe_inject_evolution_skill(conversation)
 
             self._consume_mailbox(conversation)
             if self.notification_fn:
@@ -573,6 +609,16 @@ class Agent:
 
             self.total_input_tokens += response.input_tokens
             self.total_output_tokens += response.output_tokens
+            # 成功经验路径：记录本轮 token 消耗
+            if self._evo_trace_id:
+                try:
+                    self.evolution_manager.trace_collector.record_tokens(
+                        self._evo_trace_id,
+                        response.input_tokens,
+                        response.output_tokens,
+                    )
+                except Exception as e:
+                    log.debug("[evolution] record_tokens failed: %s", e)
             yield UsageEvent(
                 input_tokens=self.total_input_tokens,
                 output_tokens=self.total_output_tokens,
@@ -655,6 +701,7 @@ class Agent:
                 if self.file_history is not None:
                     summary = response.text[:60] + "..." if len(response.text) > 60 else response.text
                     self.file_history.make_snapshot(len(conversation.history), summary)
+                self._evo_task_succeeded = True
                 yield LoopComplete(total_turns=iteration)
                 break
 
@@ -666,6 +713,15 @@ class Agent:
                 )
                 for tc in response.tool_calls
             ]
+            # 成功经验路径：记录本轮工具调用（含重复调用，供复杂度判定）
+            if self._evo_trace_id:
+                for tc in response.tool_calls:
+                    try:
+                        self.evolution_manager.trace_collector.record_tool_use(
+                            self._evo_trace_id, tc.tool_name
+                        )
+                    except Exception as e:
+                        log.debug("[evolution] record_tool_use failed: %s", e)
             conversation.add_assistant_message(
                 response.text, tool_uses, thinking_blocks=conv_thinking
             )
@@ -803,6 +859,7 @@ class Agent:
             )
             conversation.add_tool_results_message(tool_results)
             if exit_plan_called:
+                self._evo_task_succeeded = True
                 yield TurnComplete(turn=iteration)
                 yield LoopComplete(total_turns=iteration)
                 break
@@ -813,6 +870,74 @@ class Agent:
                 for he in self._drain_hook_events():
                     yield he
             yield TurnComplete(turn=iteration)
+
+        # 成功经验路径：任务结束，落盘 trace 并（若有 Skill 被命中）做降本评估
+        await self._finalize_evolution_trace(self._evo_task_succeeded)
+
+    async def _maybe_inject_evolution_skill(self, conversation: ConversationManager) -> None:
+        """任务开始时匹配正式成功 Skill，命中则注入为系统提醒。
+
+        注入内容附「由 Agent 自主判断是否采纳」说明——不强制执行。
+        匹配超时/失败时静默跳过，不影响主循环。
+        """
+        if self.evolution_manager is None:
+            return
+        try:
+            task_desc = self._infer_task_description(conversation)
+            matched = await self.evolution_manager.match_skill_for_injection(task_desc)
+        except Exception as e:
+            log.debug("[evolution] injection match failed: %s", e)
+            return
+        if not matched or not matched.get("content"):
+            return
+        name = matched.get("name", "")
+        self._evo_injected_skill = name
+        reminder = (
+            "A reusable experience skill was matched for a similar past task. "
+            "Review it and decide whether to apply it — you may reject it if the "
+            f"current task diverges.\n\n--- Matched Skill: {name} ---\n"
+            f"{matched.get('content', '')}\n--- End Skill ---"
+        )
+        conversation.add_system_reminder(reminder)
+        log.info("[evolution] injected matched skill '%s' for task", name)
+
+    async def _finalize_evolution_trace(self, success: bool) -> None:
+        """任务结束：结束 trace 收集；若有 Skill 被命中则做降本评估。"""
+        if self.evolution_manager is None or not self._evo_trace_id:
+            return
+        trace_id = self._evo_trace_id
+        injected = self._evo_injected_skill
+        try:
+            self.evolution_manager.trace_collector.end_task(trace_id, success=success)
+        except Exception as e:
+            log.debug("[evolution] end_task failed: %s", e)
+        if injected:
+            try:
+                await self.evolution_manager.evaluate_hit(injected, trace_id)
+            except Exception as e:
+                log.debug("[evolution] evaluate_hit failed: %s", e)
+        self._evo_trace_id = None
+        self._evo_injected_skill = None
+
+    @staticmethod
+    def _infer_task_description(conversation: ConversationManager) -> str:
+        """从对话中推断当前任务描述（取最近一条 user 消息）。"""
+        try:
+            for msg in reversed(conversation.history):
+                role = getattr(msg, "role", "")
+                if role == "user":
+                    content = getattr(msg, "content", "")
+                    if isinstance(content, str):
+                        return content
+                    if isinstance(content, list):
+                        for part in content:
+                            if isinstance(part, dict) and part.get("type") == "text":
+                                return str(part.get("text", ""))
+                        return str(content)
+                    return str(content)
+        except Exception:
+            pass
+        return ""
 
 
     def _consume_mailbox(self, conversation: ConversationManager) -> None:
